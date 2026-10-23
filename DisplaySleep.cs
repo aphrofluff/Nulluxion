@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Nulluxion contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -33,14 +36,34 @@ namespace Nulluxion
             }
         }
         public string LastError { get; private set; }
-        public bool IsActive { get { return original != null || File.Exists(journal); } }
+        public bool IsActive
+        {
+            get
+            {
+                if (original != null || RecoveryBlocked) return true;
+                try { return RecoveryExists(); }
+                catch { return true; } // An unreadable record must never look absent.
+            }
+        }
+
+        bool RecoveryExists()
+        {
+            try
+            {
+                if ((File.GetAttributes(journal) & FileAttributes.Directory) != 0)
+                    throw new IOException("The display recovery path is a directory.");
+                return true;
+            }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
+        }
 
         internal DisplaySleep() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Blackout", "display-recovery.bin")) { }
         internal DisplaySleep(string recoveryPath) : this(recoveryPath, new NativeBackend()) { }
         internal DisplaySleep(string recoveryPath, IBackend displayBackend)
         {
             journal = recoveryPath; backend = displayBackend;
-            try { if (File.Exists(journal)) LoadRecovery(); }
+            try { if (RecoveryExists()) LoadRecovery(); }
             catch (Exception ex) { Block("Cannot read display recovery: " + ex.Message); }
         }
 
@@ -53,6 +76,7 @@ namespace Nulluxion
                 if (IsActive) throw new InvalidOperationException("Restore the previous display configuration first.");
                 if (deviceNames == null || deviceNames.Length == 0) return true;
                 Snapshot before = backend.Capture();
+                ValidateSnapshot(before, false);
                 HashSet<string> requested = new HashSet<string>(deviceNames, StringComparer.OrdinalIgnoreCase);
                 HashSet<string> found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 List<PathInfo> remaining = new List<PathInfo>();
@@ -78,18 +102,28 @@ namespace Nulluxion
                 if (!hasOrigin)
                 {
                     ModeInfo anchor = asleep.Modes[asleep.Paths[0].Source.Mode];
-                    foreach (uint index in sources) { asleep.Modes[index].X -= anchor.X; asleep.Modes[index].Y -= anchor.Y; }
+                    foreach (uint index in sources)
+                    {
+                        asleep.Modes[index].X = checked(asleep.Modes[index].X - anchor.X);
+                        asleep.Modes[index].Y = checked(asleep.Modes[index].Y - anchor.Y);
+                    }
                 }
                 Check(backend.Set(asleep, Validate), "Validate display sleep");
+                Snapshot latest = backend.Capture();
+                if (!SameAdapters(before, latest) || !EquivalentConfiguration(before, latest))
+                    throw new InvalidOperationException("Display configuration changed while preparing signal suspension. Try again.");
                 expected = asleep;
                 WriteSnapshot(before);
                 original = before; // Keep recovery even when the driver reports a failed apply.
                 int applyError = backend.Set(asleep, Apply);
                 // Record what the driver actually did, including a partial failed apply.
                 // Subsequent retries are safe only while that topology remains unchanged.
-                try { expected = backend.Capture(); } catch { }
+                expected = backend.Capture();
                 RefreshRecovery();
                 Check(applyError, "Suspend display signal");
+                ValidateSnapshot(expected, false);
+                if (!SameTargets(asleep, expected))
+                    throw new InvalidOperationException("The driver did not suspend the requested display signals. Recovery is retained for restoration.");
                 return true;
             }
             catch (Exception ex) { LastError = ex.Message; return false; }
@@ -101,7 +135,7 @@ namespace Nulluxion
             LastError = null;
             try
             {
-                if (original == null && File.Exists(journal)) LoadRecovery();
+                if (original == null && RecoveryExists()) LoadRecovery();
                 if (original == null) return true;
                 Snapshot current = backend.Capture();
                 if (!EquivalentConfiguration(original, current))
@@ -116,8 +150,17 @@ namespace Nulluxion
                         RefreshRecovery();
                     }
                     Check(error, "Restore display configuration");
+                    // A driver may accept the request but normalize or omit part of
+                    // the layout. Do not retire the only recovery copy until verified.
+                    current = backend.Capture();
+                    if (!EquivalentConfiguration(original, current))
+                    {
+                        expected = current;
+                        RefreshRecovery();
+                        throw new InvalidOperationException("The driver did not restore the saved display configuration. Recovery is retained for retry.");
+                    }
                 }
-                if (File.Exists(journal)) File.Delete(journal);
+                if (RecoveryExists()) File.Delete(journal);
                 original = expected = null;
                 return true;
             }
@@ -148,7 +191,7 @@ namespace Nulluxion
             archivePath = null;
             try
             {
-                if (File.Exists(journal))
+                if (RecoveryExists())
                 {
                     string destination = journal + ".archived-" + Guid.NewGuid().ToString("N");
                     File.Move(journal, destination);
@@ -236,6 +279,17 @@ namespace Nulluxion
             return result;
         }
         static bool SameAdapters(Snapshot a, Snapshot b) { return Adapters(a).SetEquals(Adapters(b)); }
+        static bool SameTargets(Snapshot a, Snapshot b)
+        {
+            // Drivers may normalize source modes and positions. Verify the actual
+            // physical target set rather than assuming a successful return means off.
+            var targets = new HashSet<Tuple<ulong, uint>>();
+            foreach (PathInfo path in a.Paths) targets.Add(Tuple.Create(AdapterKey(path.Target.Adapter), path.Target.Id));
+            if (a.Paths.Length != b.Paths.Length) return false;
+            foreach (PathInfo path in b.Paths)
+                if (!targets.Remove(Tuple.Create(AdapterKey(path.Target.Adapter), path.Target.Id))) return false;
+            return targets.Count == 0;
+        }
         static ulong AdapterKey(Luid adapter) { return ((ulong)(uint)adapter.High << 32) | adapter.Low; }
 
         static Snapshot Capture()
@@ -298,8 +352,44 @@ namespace Nulluxion
                 Snapshot saved = new Snapshot { Paths = ReadArray<PathInfo>(reader), Modes = ReadArray<ModeInfo>(reader) };
                 Snapshot sleep = format == 0x42534432 ? new Snapshot { Paths = ReadArray<PathInfo>(reader), Modes = ReadArray<ModeInfo>(reader) } : null;
                 if (saved.Paths.Length == 0 || reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("Invalid display recovery record.");
+                ValidateSnapshot(saved, false);
+                if (sleep != null) ValidateSnapshot(sleep, true);
                 original = saved; expected = sleep;
             }
+        }
+
+        static void ValidateSnapshot(Snapshot value, bool allowEmpty)
+        {
+            if (value == null || value.Paths == null || value.Modes == null ||
+                (!allowEmpty && value.Paths.Length == 0) || value.Paths.Length > 512 || value.Modes.Length > 512)
+                throw new InvalidDataException("Invalid display recovery configuration.");
+            HashSet<Tuple<ulong, uint, uint>> modes = new HashSet<Tuple<ulong, uint, uint>>();
+            foreach (ModeInfo mode in value.Modes)
+            {
+                // This backend deliberately uses the non-virtual CCD representation.
+                if ((mode.Type != 1 && mode.Type != 2) ||
+                    !modes.Add(Tuple.Create(AdapterKey(mode.Adapter), mode.Id, mode.Type)) ||
+                    (mode.Type == 1 && (mode.Width == 0 || mode.Height == 0)))
+                    throw new InvalidDataException("Invalid or duplicate display recovery mode.");
+            }
+            HashSet<Tuple<ulong, uint>> targets = new HashSet<Tuple<ulong, uint>>();
+            foreach (PathInfo path in value.Paths)
+            {
+                if ((path.Flags & 1) == 0 || !targets.Add(Tuple.Create(AdapterKey(path.Target.Adapter), path.Target.Id)))
+                    throw new InvalidDataException("Invalid or duplicate active display recovery path.");
+                ValidateModeReference(value, path.Source.Mode, 1, path.Source.Adapter, path.Source.Id);
+                // Missing target timing is legal: SetDisplayConfig derives it from
+                // the supplied source mode. A missing source is unsafe for recovery.
+                if (path.Target.Mode != uint.MaxValue)
+                    ValidateModeReference(value, path.Target.Mode, 2, path.Target.Adapter, path.Target.Id);
+            }
+        }
+
+        static void ValidateModeReference(Snapshot value, uint index, uint type, Luid adapter, uint id)
+        {
+            if (index >= value.Modes.Length || value.Modes[index].Type != type ||
+                value.Modes[index].Id != id || !value.Modes[index].Adapter.Equals(adapter))
+                throw new InvalidDataException("Invalid display recovery mode reference.");
         }
 
         static void WriteArray<T>(BinaryWriter writer, T[] values) where T : struct
@@ -347,6 +437,10 @@ namespace Nulluxion
         [StructLayout(LayoutKind.Explicit, Size = 64)] internal struct ModeInfo
         {
             [FieldOffset(0)] internal uint Type;
+            [FieldOffset(4)] internal uint Id;
+            [FieldOffset(8)] internal Luid Adapter;
+            [FieldOffset(16)] internal uint Width;
+            [FieldOffset(20)] internal uint Height;
             [FieldOffset(0)] internal ulong Raw0;
             [FieldOffset(8)] internal ulong Raw1;
             [FieldOffset(16)] internal ulong Raw2;

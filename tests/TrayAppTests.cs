@@ -1,4 +1,8 @@
+// Copyright (C) 2026 Nulluxion contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
 using System;
+using System.IO;
 using System.Windows.Forms;
 
 namespace Nulluxion.Tests
@@ -18,6 +22,8 @@ namespace Nulluxion.Tests
             CheckInputQuietPeriod();
             CheckDeferredSleep();
             CheckDirectHardwareSleep();
+            CheckSettings();
+            CheckDisposalAndRestoreFailures();
             FakePower power = new FakePower();
             int sleep = 0, wake = 0;
             var settings = new Settings { TurnOffBacklights = true };
@@ -84,6 +90,67 @@ namespace Nulluxion.Tests
             Check(!input.Observe(uint.MaxValue - 399, 42, false), "fresh observation after unreadable input defers sleep");
             Check(!input.Observe(399, 42, false), "tick wrap does not shorten quiet interval");
             Check(input.Observe(400, 42, false), "quiet interval handles tick wrap");
+        }
+
+        static void CheckSettings()
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "Nulluxion-settings-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "settings.xml");
+            try
+            {
+                Check(Settings.Load(path).Key == (uint)Keys.B, "missing settings use defaults");
+                var settings = new Settings { Modifiers = 2, Key = (uint)Keys.F8, UsePointer = true, TurnOffBacklights = false };
+                settings.Save(path);
+                Settings loaded = Settings.Load(path);
+                Check(loaded.Modifiers == 2 && loaded.Key == (uint)Keys.F8 && loaded.UsePointer && !loaded.TurnOffBacklights, "settings round trip");
+                settings.Key = (uint)Keys.F9; settings.Save(path);
+                Check(Settings.Load(path).Key == (uint)Keys.F9 && !File.Exists(path + ".tmp"), "settings atomically replace existing file");
+                File.WriteAllText(path, "<Settings><Modifiers>7</Modifiers><Key>66</Key><UsePointer>true</UsePointer><TurnOffBacklights>false</TurnOffBacklights></Settings>");
+                loaded = Settings.Load(path);
+                Check(loaded.Modifiers == 3 && loaded.Key == (uint)Keys.B && loaded.UsePointer && !loaded.TurnOffBacklights, "reserved persisted shortcut resets without discarding preferences");
+                File.WriteAllText(path, "<!DOCTYPE Settings [<!ENTITY value 'false'>]><Settings><TurnOffBacklights>&value;</TurnOffBacklights></Settings>");
+                Check(Settings.Load(path).TurnOffBacklights, "DTD settings rejected");
+                File.WriteAllText(path, "<Settings><!--" + new string('x', 65536) + "--><TurnOffBacklights>false</TurnOffBacklights></Settings>");
+                Check(Settings.Load(path).TurnOffBacklights, "oversized settings rejected");
+                File.WriteAllText(path, "<Settings><Key>");
+                Check(Settings.Load(path).Key == (uint)Keys.B, "truncated settings use defaults");
+                Check(!Settings.IsValidShortcut(0, (uint)Keys.A) && !Settings.IsValidShortcut(16, (uint)Keys.A) &&
+                    !Settings.IsValidShortcut(3, 0) && !Settings.IsValidShortcut(3, uint.MaxValue), "invalid keys and modifier flags rejected");
+                Check(!Settings.IsValidShortcut(3, (uint)Keys.Escape) && !Settings.IsValidShortcut(3, (uint)Keys.F12) &&
+                    !Settings.IsValidShortcut(3, (uint)Keys.ControlKey), "escape, debugger key and standalone modifier rejected");
+                Check(Settings.IsValidShortcut(0, (uint)Keys.F1) && Settings.IsValidShortcut(3, (uint)Keys.B), "supported shortcuts accepted");
+            }
+            finally { Directory.Delete(directory, true); }
+        }
+
+        static void CheckDisposalAndRestoreFailures()
+        {
+            FakePower power = new FakePower();
+            var app = new TrayApp(true, power, new Settings(), false, delegate { });
+            app.ToggleAll();
+            app.Dispose();
+            Check(power.Disposed && !app.IsActive, "Dispose alone restores monitors and releases controller");
+            int restores = power.RestoreCalls;
+            app.Dispose(); app.ExitThread();
+            Check(power.RestoreCalls == restores, "cleanup is idempotent");
+            power.Publish("after disposal"); power.ExternalChange(); Pump();
+
+            power = new FakePower();
+            app = new TrayApp(true, power, new Settings(), false, delegate(bool sleep) { if (!sleep) throw new InvalidOperationException("Simulated wake failure"); });
+            try
+            {
+                app.ToggleAll(); CompleteFallback(power); app.RequestDisplaySleep();
+                restores = power.RestoreCalls;
+                bool failed = false;
+                try { app.Restore(); } catch (InvalidOperationException) { failed = true; }
+                Check(failed && !app.IsActive && power.RestoreCalls == restores + 1, "Windows wake exception still restores hardware and removes overlays");
+                app.ToggleAll(); power.ThrowOnRestore = true;
+                failed = false;
+                try { app.Restore(); } catch (InvalidOperationException) { failed = true; }
+                Check(failed && !app.IsActive, "controller exception cannot strand black overlays");
+            }
+            finally { power.ThrowOnRestore = false; app.Dispose(); }
         }
 
         static void CheckDeferredSleep()
@@ -163,9 +230,10 @@ namespace Nulluxion.Tests
             internal int RestoreCalls;
             internal int AllCalls;
             internal bool Disposed;
+            internal bool ThrowOnRestore;
             public void SetTargets(string[] names) { IsRestored = false; AllScreensPoweredOff = NeedsDisplaySleepFallback = false; }
             public void SetAllTargets(string[] names) { AllCalls++; SetTargets(names); }
-            public void Restore() { RestoreCalls++; SetTargets(new string[0]); }
+            public void Restore() { RestoreCalls++; if (ThrowOnRestore) throw new InvalidOperationException("Simulated controller failure"); SetTargets(new string[0]); }
             public void NotifyTopologyChanged() { ExternalChange(); }
             public void RetireRecovery() { CompleteRecovery(); }
             public void Dispose() { Disposed = true; }

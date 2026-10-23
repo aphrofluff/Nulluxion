@@ -1,5 +1,15 @@
-param([string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'), [string]$DeviceName = '\\.\DISPLAY2', [int]$Seconds = 20)
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
+param(
+    [string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'),
+    [string]$DeviceName = '\\.\DISPLAY2',
+    [ValidateRange(1, 60)][int]$Seconds = 20,
+    [switch]$AllowMonitorChanges
+)
 $ErrorActionPreference = 'Stop'
+if (-not $AllowMonitorChanges) { throw 'This manual diagnostic changes physical display configuration. Read README.md, close Nulluxion, then opt in with -AllowMonitorChanges.' }
+if (Get-Process -Name Nulluxion,Blackout -ErrorAction SilentlyContinue) { throw 'Close Nulluxion/Blackout before running physical diagnostics.' }
 Add-Type -AssemblyName System.Windows.Forms
 $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $AssemblyPath).Path)
 $type = $assembly.GetType('Nulluxion.DisplaySleep', $true)
@@ -20,7 +30,8 @@ try {
 # Query a fresh PowerShell process instead to compare the live post-restore arrangement.
 $query = 'Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Screen]::AllScreens | ForEach-Object { "$($_.DeviceName):$($_.Bounds):$($_.Primary)" } | Sort-Object'
 $encodedQuery = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($query))
-$after = @(& powershell -NoProfile -EncodedCommand $encodedQuery)
+$windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$after = @(& $windowsPowerShell -NoProfile -EncodedCommand $encodedQuery)
 if ($LASTEXITCODE -ne 0) { throw 'Could not query the restored display arrangement.' }
 if (Compare-Object $before $after) { throw 'Display arrangement differs after restoration.' }
 Write-Output 'PASS: signal sleep, restore, display bounds and primary monitor preserved.'

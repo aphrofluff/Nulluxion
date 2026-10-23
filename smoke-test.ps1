@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 param([string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'))
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms

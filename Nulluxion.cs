@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Nulluxion contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
 using System;
 using System.Drawing;
 using System.Collections.Generic;
@@ -6,6 +9,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using System.Xml;
 using System.Xml.Serialization;
 using Microsoft.Win32;
 
@@ -20,16 +24,39 @@ namespace Nulluxion
         // Keep the legacy data location so existing settings and recovery records remain usable.
         public static readonly string FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Blackout", "settings.xml");
         public static Settings Load()
+        { return Load(FileName); }
+        internal static Settings Load(string path)
         {
-            try { using (var file = File.OpenRead(FileName)) return (Settings)new XmlSerializer(typeof(Settings)).Deserialize(file) ?? new Settings(); }
+            try
+            {
+                var options = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 65536 };
+                using (var reader = XmlReader.Create(path, options))
+                {
+                    Settings settings = (Settings)new XmlSerializer(typeof(Settings)).Deserialize(reader) ?? new Settings();
+                    if (!IsValidShortcut(settings.Modifiers, settings.Key))
+                    { settings.Modifiers = 3; settings.Key = (uint)Keys.B; }
+                    return settings;
+                }
+            }
             catch { return new Settings(); }
         }
         public void Save()
+        { Save(FileName); }
+        internal void Save(string path)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FileName));
-            string temporary = FileName + ".tmp";
+            if (!IsValidShortcut(Modifiers, Key)) throw new InvalidOperationException("The shortcut is invalid or reserved.");
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
+            string temporary = path + ".tmp";
             using (var file = File.Create(temporary)) new XmlSerializer(typeof(Settings)).Serialize(file, this);
-            if (File.Exists(FileName)) File.Replace(temporary, FileName, null); else File.Move(temporary, FileName);
+            if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
+        }
+        internal static bool IsValidShortcut(uint modifiers, uint key)
+        {
+            if ((modifiers & ~15u) != 0 || key < 8 || key > 254 || key == (uint)Keys.Escape || key == (uint)Keys.F12) return false;
+            if (key == (uint)Keys.ControlKey || key == (uint)Keys.Menu || key == (uint)Keys.ShiftKey ||
+                key == (uint)Keys.LWin || key == (uint)Keys.RWin || (key >= (uint)Keys.LShiftKey && key <= (uint)Keys.RMenu)) return false;
+            if (modifiers == 7 && key == (uint)Keys.B) return false;
+            return modifiers != 0 || (key >= (uint)Keys.F1 && key <= (uint)Keys.F24);
         }
     }
 
@@ -152,6 +179,11 @@ namespace Nulluxion
             toggleAll = new ToolStripMenuItem("Black out all monitors (Ctrl+Alt+Shift+B)", null, delegate { ToggleAll(); });
             menu.Items.Add(toggleAll);
             menu.Items.Add("Settings", null, delegate { OpenSettings(); });
+            menu.Items.Add("About / license", null, delegate
+            {
+                Restore();
+                MessageBox.Show("Nulluxion\nCopyright (C) 2026 Nulluxion contributors\n\nLicensed under the GNU General Public License, version 3 only. You may redistribute and modify this program under that license. This program comes with absolutely no warranty.\n\nSee the included LICENSE file or https://www.gnu.org/licenses/gpl-3.0.html.\nSource: https://github.com/aphrofluff/Nulluxion", "About Nulluxion", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit Nulluxion", null, delegate { ExitThread(); });
             tray = new NotifyIcon { Icon = icon, Text = "Nulluxion", ContextMenuStrip = menu, Visible = interactive };
@@ -300,19 +332,28 @@ namespace Nulluxion
         {
             sleepTimer.Stop();
             windowsSleepFallback = false;
-            if (displaySleepRequested)
+            try
             {
-                displayPower(false);
-                displaySleepRequested = false;
+                if (displaySleepRequested)
+                {
+                    displaySleepRequested = false;
+                    displayPower(false);
+                }
             }
-            hardware.Restore();
-            foreach (var overlay in overlays) overlay.Dispose();
-            overlays.Clear();
-            allScreens = false;
-            Native.UnregisterHotKey(hotkeys.Handle, 2);
-            toggle.Text = "Black out other monitors";
-            toggleAll.Text = "Black out all monitors (Ctrl+Alt+Shift+B)";
-            tray.Text = "Nulluxion";
+            finally
+            {
+                try { hardware.Restore(); }
+                finally
+                {
+                    foreach (var overlay in overlays) overlay.Dispose();
+                    overlays.Clear();
+                    allScreens = false;
+                    Native.UnregisterHotKey(hotkeys.Handle, 2);
+                    toggle.Text = "Black out other monitors";
+                    toggleAll.Text = "Black out all monitors (Ctrl+Alt+Shift+B)";
+                    tray.Text = "Nulluxion";
+                }
+            }
         }
         private void DisplayChanged(object sender, EventArgs args)
         {
@@ -331,7 +372,7 @@ namespace Nulluxion
         internal bool ChangeShortcut(uint modifiers, uint key)
         {
             // Keep the all-screen shortcut separate, even if its registration failed.
-            if (modifiers == 7 && key == (uint)Keys.B) return false;
+            if (!Nulluxion.Settings.IsValidShortcut(modifiers, key)) return false;
             Native.UnregisterHotKey(hotkeys.Handle, 1);
             if (!Native.RegisterHotKey(hotkeys.Handle, 1, modifiers | 0x4000, key))
             {
@@ -369,6 +410,16 @@ namespace Nulluxion
         }
         protected override void ExitThreadCore()
         {
+            try { Cleanup(); }
+            finally { base.ExitThreadCore(); }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            try { if (disposing) Cleanup(); }
+            finally { base.Dispose(disposing); }
+        }
+        private void Cleanup()
+        {
             if (disposed) return;
             disposed = true;
             hardware.ExternalDisplayChanged -= DispatchRestore;
@@ -376,10 +427,18 @@ namespace Nulluxion
             SystemEvents.SessionSwitch -= SessionChanged;
             SystemEvents.PowerModeChanged -= PowerChanged;
             SystemEvents.SessionEnding -= SessionEnding;
-            Restore(); hardware.Dispose(); sleepTimer.Dispose(); hotkeys.Dispose(); tray.Visible = false;
-            tray.ContextMenuStrip.Dispose(); tray.Dispose();
-            if (window != null) window.Dispose();
-            icon.Dispose(); base.ExitThreadCore();
+            try { Restore(); }
+            finally
+            {
+                try { hardware.Dispose(); }
+                finally
+                {
+                    sleepTimer.Dispose(); hotkeys.Dispose(); tray.Visible = false;
+                    tray.ContextMenuStrip.Dispose(); tray.Dispose();
+                    if (window != null) window.Dispose();
+                    icon.Dispose();
+                }
+            }
         }
     }
 
@@ -474,7 +533,7 @@ namespace Nulluxion
             e.SuppressKeyPress = true;
             if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.Menu || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.LWin || e.KeyCode == Keys.RWin) return;
             uint modifiers = (uint)((e.Control ? 2 : 0) | (e.Alt ? 1 : 0) | (e.Shift ? 4 : 0));
-            if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.F12 || (modifiers == 0 && (e.KeyCode < Keys.F1 || e.KeyCode > Keys.F24)))
+            if (!Settings.IsValidShortcut(modifiers, (uint)e.KeyCode))
             { status.Text = "Use Ctrl, Alt or Shift with a key, or a function key.\nEscape and F12 are reserved."; return; }
             try
             {
@@ -515,11 +574,33 @@ namespace Nulluxion
             using (var mutex = new Mutex(true, @"Local\Blackout.TrayApp", out created))
             {
                 if (!created) { MessageBox.Show("Nulluxion is already running. Open it from the system tray.", "Nulluxion"); return; }
-                try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
-                catch (EntryPointNotFoundException) { Native.SetProcessDPIAware(); }
-                Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-                using (var app = new TrayApp(Array.IndexOf(args, "--startup") >= 0)) Application.Run(app);
-                mutex.ReleaseMutex();
+                try
+                {
+                    try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
+                    catch (EntryPointNotFoundException) { Native.SetProcessDPIAware(); }
+                    Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                    // Own power outside tray construction as well: initialization
+                    // failures must still stop the worker and attempt restoration.
+                    using (var power = new HardwarePower())
+                    using (var app = new TrayApp(Array.IndexOf(args, "--startup") >= 0, power, Settings.Load(), true, null))
+                    {
+                        ThreadExceptionEventHandler failure = delegate(object sender, ThreadExceptionEventArgs error)
+                        {
+                            app.ExitThread();
+                            MessageBox.Show("Nulluxion closed after an unexpected error and attempted to restore your monitors.\n\n" + error.Exception.Message,
+                                "Nulluxion", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        };
+                        Application.ThreadException += failure;
+                        try { Application.Run(app); }
+                        finally { Application.ThreadException -= failure; }
+                    }
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show("Nulluxion could not continue.\n\n" + error.Message, "Nulluxion", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally { mutex.ReleaseMutex(); }
             }
         }
     }

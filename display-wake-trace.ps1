@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 param(
     [ValidateRange(1, 600)]
     [int]$Seconds = 180,

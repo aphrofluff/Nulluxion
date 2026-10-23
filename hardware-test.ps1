@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 param([string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'))
 $ErrorActionPreference = 'Stop'
 $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $AssemblyPath).Path)

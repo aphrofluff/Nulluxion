@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Nulluxion contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -77,10 +80,12 @@ namespace Nulluxion
         internal HardwarePower() : this(new NativeBackend(), new DisplaySleep(), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Blackout", "power-recovery.txt"), 2000) { }
         internal HardwarePower(IBackend backend, IDisplayPower displaySleep, string recoveryPath, int retryMilliseconds)
         {
-            this.backend = backend; this.displaySleep = displaySleep; journal = recoveryPath; this.retryMilliseconds = Math.Max(1, retryMilliseconds);
+            this.backend = backend; this.displaySleep = displaySleep; journal = Path.GetFullPath(recoveryPath); this.retryMilliseconds = Math.Max(1, retryMilliseconds);
             try
             {
-                if (File.Exists(journal)) foreach (string line in File.ReadAllLines(journal))
+                // File.Exists hides access and I/O errors; only a genuinely missing
+                // journal permits starting a new power operation without recovery.
+                foreach (string line in File.ReadAllLines(journal))
                 {
                     if (String.IsNullOrWhiteSpace(line)) continue;
                     // Legacy DISPLAYn records cannot safely identify a device after reboot.
@@ -88,6 +93,8 @@ namespace Nulluxion
                     recovery.Add(line);
                 }
             }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
             catch (Exception ex) { unreadableJournal = true; Report("Cannot read monitor recovery file: " + ex.Message); }
             unresolved = unreadableJournal || recovery.Count > 0 || displaySleep.IsActive;
             worker = new Thread(Run); worker.Name = "Nulluxion monitor power"; worker.IsBackground = true; worker.Start();
@@ -107,8 +114,9 @@ namespace Nulluxion
         public void Dispose()
         {
             lock (gate) { if (stopping) return; stopping = true; desiredAll = false; desired = new string[0]; version++; changed.Set(); }
-            // Signal and disposal share the gate, so a queued requester cannot touch a disposed event.
-            if (Thread.CurrentThread != worker && worker.Join(5000)) lock (gate) changed.Dispose();
+            // The worker owns the event until its native calls and recovery finish,
+            // including when this bounded wait expires or a worker callback disposes us.
+            if (Thread.CurrentThread != worker) worker.Join(5000);
         }
         bool Current(int generation) { lock (gate) return !stopping && version == generation; }
         void Report(string message)
@@ -195,8 +203,8 @@ namespace Nulluxion
                     if (pending.Count == 0 && !displaySleep.IsActive) break;
                     if (attempt < 2) Thread.Sleep(Math.Min(250, retryMilliseconds));
                 }
-                foreach (Monitor monitor in pending) monitor.Dispose();
-                pending.Clear();
+                try { foreach (Monitor monitor in pending) monitor.Dispose(); pending.Clear(); }
+                finally { lock (gate) { stopping = true; changed.Dispose(); } }
             }
         }
         void MarkRestored(int generation)
@@ -224,12 +232,17 @@ namespace Nulluxion
                 if (!displaySleep.ArchiveRecovery(out archive)) { Report(displaySleep.LastError); return; }
                 Report("Display recovery archived at " + archive);
             }
-            if (File.Exists(journal))
+            archive = journal + ".retired-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff", CultureInfo.InvariantCulture);
+            try
             {
-                archive = journal + ".retired-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff", CultureInfo.InvariantCulture);
+                // File.Move reports a source directory as FileNotFoundException;
+                // distinguish that unreadable journal from a genuinely absent file.
+                if ((File.GetAttributes(journal) & FileAttributes.Directory) != 0) throw new IOException("Monitor recovery path is a directory.");
                 File.Move(journal, archive);
                 Report("Unresolved monitor recovery archived at " + archive);
             }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
             foreach (Monitor monitor in pending) monitor.Dispose();
             pending.Clear(); recovery.Clear(); unreadableJournal = false; rollbackNeeded = false; unresolved = false;
         }
@@ -264,11 +277,13 @@ namespace Nulluxion
                 if (!success)
                 {
                     bool found = false; success = true;
-                    foreach (Monitor fresh in backend.Enumerate())
+                    List<Monitor> freshMonitors = backend.Enumerate();
+                    try
                     {
-                        try { if (String.Equals(fresh.Identity, identity, StringComparison.OrdinalIgnoreCase)) { found = true; success &= backend.SetPower(fresh, 1); } }
-                        finally { fresh.Dispose(); }
+                        foreach (Monitor fresh in freshMonitors)
+                            if (String.Equals(fresh.Identity, identity, StringComparison.OrdinalIgnoreCase)) { found = true; success &= backend.SetPower(fresh, 1); }
                     }
+                    finally { foreach (Monitor fresh in freshMonitors) fresh.Dispose(); }
                     success &= found;
                 }
                 if (!success) { Report("Monitor wake failed; recovery retained for retry."); continue; }
@@ -350,7 +365,7 @@ namespace Nulluxion
                     bool added = recovery.Add(monitor.Identity);
                     try { SaveRecovery(); }
                     catch (Exception ex) { failed.Add(name); if (added) recovery.Remove(monitor.Identity); Report("Power-off skipped: cannot save recovery: " + ex.Message); continue; }
-                    pending.Add(monitor);
+                    pending.Add(monitor); unresolved = true;
                     if (!Current(generation)) break;
                     // Assume ambiguous native failures need waking, including exceptions.
                     monitor.NeedsWake = true;
@@ -408,7 +423,13 @@ namespace Nulluxion
             // layout change. Only DISPLAY_DEVICE_ACTIVE children belong to the
             // current physical group; inactive history must not alter identity.
             foreach (KeyValuePair<string, uint> device in devices)
-                if ((device.Value & 1) != 0 && !String.IsNullOrEmpty(device.Key)) identities.Add(device.Key.ToUpperInvariant());
+                if ((device.Value & 1) != 0)
+                {
+                    // An unidentified active clone member makes the entire group
+                    // ambiguous; never persist an identity for only its known subset.
+                    if (String.IsNullOrWhiteSpace(device.Key)) return null;
+                    identities.Add(device.Key.ToUpperInvariant());
+                }
             if (identities.Count == 0) return null;
             identities.Sort(StringComparer.Ordinal);
             return "v2:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(String.Join("\n", identities.ToArray())));
@@ -456,19 +477,41 @@ namespace Nulluxion
         static List<Monitor> Enumerate()
         {
             List<Monitor> result = new List<Monitor>();
+            Exception callbackError = null;
             MonitorEnum callback = delegate(IntPtr handle, IntPtr dc, ref Rect bounds, IntPtr data)
             {
-                MonitorInfo info = new MonitorInfo(); info.Size = Marshal.SizeOf(typeof(MonitorInfo));
-                uint count;
-                if (!GetMonitorInfo(handle, ref info) || !GetNumberOfPhysicalMonitorsFromHMONITOR(handle, out count) || count == 0 || count > 128) return true;
-                PhysicalMonitor[] physical = new PhysicalMonitor[count];
-                if (!GetPhysicalMonitorsFromHMONITOR(handle, count, physical)) return true;
-                string identity = StableIdentity(info.Device);
-                foreach (PhysicalMonitor item in physical) result.Add(new Monitor { Handle = item.Handle, Name = info.Device, Identity = identity });
-                return true;
+                PhysicalMonitor[] physical = null;
+                int transferred = 0;
+                bool acquired = false;
+                try
+                {
+                    MonitorInfo info = new MonitorInfo(); info.Size = Marshal.SizeOf(typeof(MonitorInfo));
+                    uint count;
+                    if (!GetMonitorInfo(handle, ref info) || !GetNumberOfPhysicalMonitorsFromHMONITOR(handle, out count) || count == 0 || count > 128) return true;
+                    string identity = StableIdentity(info.Device);
+                    physical = new PhysicalMonitor[count];
+                    if (!GetPhysicalMonitorsFromHMONITOR(handle, count, physical)) return true;
+                    acquired = true;
+                    for (; transferred < physical.Length; transferred++)
+                        result.Add(new Monitor { Handle = physical[transferred].Handle, Name = info.Device, Identity = identity });
+                    return true;
+                }
+                // Never let a managed exception escape through a native callback.
+                catch (Exception ex) { callbackError = ex; return false; }
+                finally
+                {
+                    if (acquired) for (int index = transferred; index < physical.Length; index++) DestroyPhysicalMonitor(physical[index].Handle);
+                }
             };
-            if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero)) { foreach (Monitor item in result) item.Dispose(); result.Clear(); }
-            GC.KeepAlive(callback); return result;
+            try
+            {
+                bool success = EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
+                if (callbackError != null) throw new IOException("Physical monitor enumeration failed.", callbackError);
+                if (!success) { foreach (Monitor item in result) item.Dispose(); result.Clear(); }
+                return result;
+            }
+            catch { foreach (Monitor item in result) item.Dispose(); throw; }
+            finally { GC.KeepAlive(callback); }
         }
         [StructLayout(LayoutKind.Sequential)] struct Rect { internal int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct MonitorInfo

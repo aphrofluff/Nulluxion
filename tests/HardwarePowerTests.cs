@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Nulluxion contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -17,7 +20,7 @@ internal static class HardwarePowerTests
     sealed class Backend : HardwarePower.IBackend
     {
         internal volatile bool Present = true, FailWake, Signal, ThrowOnce, NoCaps, ThrowAlways;
-        internal int Off, Wake, Released, Enumerations, Count = 1;
+        internal int Off, Wake, Released, Created, Enumerations, Count = 1, ThrowWakeAt;
         internal string Identity = "v2:test";
         internal Action OnCapabilities;
         internal bool TwoLogical, UnsupportedSecond, FailOff, ThrowOff, ZeroHandle;
@@ -31,7 +34,11 @@ internal static class HardwarePowerTests
             Interlocked.Increment(ref Enumerations);
             if (ThrowOnce || ThrowAlways) { ThrowOnce = false; throw new IOException("transient fake enumeration"); }
             List<HardwarePower.Monitor> items = new List<HardwarePower.Monitor>();
-            if (Present) for (int i = 0; i < Count; i++) items.Add(new HardwarePower.Monitor { Name = Renumbered ? (i == 0 ? "DISPLAY2" : "DISPLAY9") : (TwoLogical && i > 0 ? "DISPLAY2" : "DISPLAY1"), Identity = TwoLogical && i > 0 ? "v2:second" : Identity, Handle = ZeroHandle ? IntPtr.Zero : new IntPtr(i + 1), Release = delegate { Interlocked.Increment(ref Released); } });
+            if (Present) for (int i = 0; i < Count; i++)
+            {
+                items.Add(new HardwarePower.Monitor { Name = Renumbered ? (i == 0 ? "DISPLAY2" : "DISPLAY9") : (TwoLogical && i > 0 ? "DISPLAY2" : "DISPLAY1"), Identity = TwoLogical && i > 0 ? "v2:second" : Identity, Handle = ZeroHandle ? IntPtr.Zero : new IntPtr(i + 1), Release = delegate { Interlocked.Increment(ref Released); } });
+                Interlocked.Increment(ref Created);
+            }
             return items;
         }
         public string[] SignalSleepTargets(string[] names) { return SignalNames ?? (Signal ? names : new string[0]); }
@@ -40,7 +47,8 @@ internal static class HardwarePowerTests
         public bool SetPower(HardwarePower.Monitor item, uint value)
         {
             if (value == 4 || value == 5) { LastOffValue = value; ReleasedAtOff = Released; Interlocked.Increment(ref Off); if (ThrowOff) throw new IOException("fake power write error"); DdcOff = !FailOff; return !FailOff; }
-            Interlocked.Increment(ref Wake); return !FailWake;
+            if (Interlocked.Increment(ref Wake) == ThrowWakeAt) throw new IOException("fake wake error");
+            return !FailWake;
         }
     }
     sealed class Display : IDisplayPower
@@ -69,6 +77,8 @@ internal static class HardwarePowerTests
         Check(singleIdentity != HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("monitor-b", 1), new KeyValuePair<string, uint>("monitor-a", 1) }), "active clone members remain part of physical group identity");
         Check(HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("monitor-b", 1), new KeyValuePair<string, uint>("monitor-a", 1) }) == HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("monitor-a", 1), new KeyValuePair<string, uint>("monitor-b", 1) }), "active clone identity is independent of device enumeration order");
         Check(HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("inactive-monitor", 0) }) == null, "no active monitor identity prevents unsafe targeting");
+        Check(HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("monitor-a", 1), new KeyValuePair<string, uint>(null, 1) }) == null, "unidentified active clone member rejects partial group identity");
+        Check(HardwarePower.ActiveMonitorIdentity(new[] { new KeyValuePair<string, uint>("monitor-a", 1), new KeyValuePair<string, uint>(" ", 1) }) == null, "blank active interface rejects partial group identity");
         string directory = Path.Combine(Path.GetTempPath(), "Nulluxion-power-tests-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
@@ -88,6 +98,31 @@ internal static class HardwarePowerTests
                 Await(delegate { return power.IsRestored; }, "wake eventually recovers");
             }
             File.Delete(path);
+            backend = new Backend { Count = 3, FailWake = true, ThrowWakeAt = 4 }; display = new Display();
+            using (HardwarePower power = new HardwarePower(backend, display, path, 10))
+            {
+                power.SetTargets(new[] { "DISPLAY1" });
+                Await(delegate { return backend.Off == 3; }, "clone group powered off for exceptional wake test");
+                power.Restore();
+                Await(delegate { return backend.Wake > 4; }, "wake exception in fresh enumeration retries");
+                backend.FailWake = false;
+                Await(delegate { return power.IsRestored; }, "exceptional fresh wake eventually recovers");
+            }
+            Check(backend.Created == backend.Released, "exception midway through fresh wake releases every enumerated handle");
+            string blockedPath = Path.Combine(directory, "blocked-journal");
+            Directory.CreateDirectory(blockedPath);
+            backend = new Backend(); display = new Display();
+            using (HardwarePower power = new HardwarePower(backend, display, blockedPath, 10))
+            {
+                power.SetAllTargets(new[] { "DISPLAY1" });
+                Await(delegate { return power.NeedsDisplaySleepFallback; }, "unreadable journal completes request with fallback");
+                Check(power.HasUnresolvedRecovery && !power.IsRestored, "directory at recovery path is unreadable recovery, not a missing journal");
+                Check(backend.Off == 0 && backend.Enumerations == 0, "unreadable recovery blocks new hardware operations");
+                power.RetireRecovery();
+                power.SetAllTargets(new[] { "DISPLAY1" });
+                Await(delegate { return power.NeedsDisplaySleepFallback; }, "failed archive request completes without hardware power");
+                Check(power.HasUnresolvedRecovery && backend.Off == 0, "failed archive cannot discard unreadable recovery");
+            }
             backend = new Backend { Signal = true }; display = new Display { FailSleep = true, FailRestore = true };
             using (HardwarePower power = new HardwarePower(backend, display, path, 10))
             {
@@ -175,6 +210,17 @@ internal static class HardwarePowerTests
             racing.SetTargets(new[] { "DISPLAY1" }); racing.Dispose();
             Check(requestError == null, "concurrent request/dispose never touches disposed event");
             Check(backend.Off == 0, "cancelled requests never write monitor power");
+            backend = new Backend(); display = new Display();
+            using (HardwarePower power = new HardwarePower(backend, display, path, 10))
+            {
+                Await(delegate { return power.IsRestored; }, "ready for worker callback disposal");
+                AutoResetEvent wakeSignal = (AutoResetEvent)typeof(HardwarePower).GetField("changed", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(power);
+                backend.OnCapabilities = delegate { power.Dispose(); };
+                power.SetTargets(new[] { "DISPLAY1" });
+                Await(delegate { return wakeSignal.SafeWaitHandle.IsClosed; }, "worker callback disposal eventually closes native event");
+                Check(backend.Off == 0 && backend.Created == backend.Released, "worker callback disposal cancels power and releases physical handles");
+                power.Restore(); power.NotifyTopologyChanged(); power.RetireRecovery();
+            }
             backend = new Backend { Count = 2, TwoLogical = true, SignalNames = new[] { "display2" } }; display = new Display();
             display.OnSleep = delegate { backend.DdcOff = false; backend.Renumbered = true; };
             using (HardwarePower power = new HardwarePower(backend, display, path, 10))

@@ -1,8 +1,14 @@
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 param(
     [ValidateSet(2,3)][uint32]$StandbyMode = 2,
-    [string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe')
+    [string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'),
+    [switch]$AllowMonitorChanges
 )
 $ErrorActionPreference = 'Stop'
+if (-not $AllowMonitorChanges) { throw 'This experimental manual diagnostic sends physical monitor power commands. Read README.md, close Nulluxion, then opt in with -AllowMonitorChanges.' }
+if (Get-Process -Name Nulluxion,Blackout -ErrorAction SilentlyContinue) { throw 'Close Nulluxion/Blackout before running physical diagnostics.' }
 # Explicit hardware diagnostic: target only EX240N, restore in finally, journal first.
 $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $AssemblyPath).Path)
 $type = $assembly.GetType('Nulluxion.HardwarePower', $true)

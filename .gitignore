@@ -1,0 +1,25 @@
+dist/Blackout.exe
+dist/candidate/Blackout.exe
+dist/candidate/tests/Blackout.Tests.exe
+dist/diagnostics/HardwareAllProbe.exe
+dist/hardware-agent-check/Blackout.exe
+dist/hardware-agent-check/tests/Blackout.Tests.exe
+dist/hardware-all/Blackout.exe
+dist/hardware-all/tests/Blackout.Tests.exe
+dist/Nulluxion.exe
+dist/sleep-fix/Blackout.exe
+dist/sleep-fix/tests/Blackout.Tests.exe
+dist/tests/Nulluxion.Tests.exe
+
+# Generated builds, local diagnostics, and saved monitor state are not source.
+/dist/
+/bin/
+/obj/
+/.vs/
+*.user
+*.suo
+*.log
+*.tmp
+.env
+.env.*
+!.env.example

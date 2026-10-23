@@ -1,4 +1,0 @@
-2026-10-22T07:20:11.1790582Z elapsed_ms=0 START seconds=1 read_only=true; last-input timestamps only; no key identities or text
-2026-10-22T07:20:11.1856603Z elapsed_ms=7 LAST_INPUT initial tick_ms=60631562
-2026-10-22T07:20:11.1891569Z elapsed_ms=10 WM_POWERBROADCAST PBT_POWERSETTINGCHANGE session_display=1(on)
-2026-10-22T07:20:12.2716907Z elapsed_ms=1092 STOP

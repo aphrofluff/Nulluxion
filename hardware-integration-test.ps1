@@ -1,5 +1,10 @@
-param([string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'))
+# Copyright (C) 2026 Nulluxion contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
+param([string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'), [switch]$AllowMonitorChanges)
 $ErrorActionPreference = 'Stop'
+if (-not $AllowMonitorChanges) { throw 'This manual diagnostic changes physical monitor power and display configuration. Read README.md, close Nulluxion, then opt in with -AllowMonitorChanges.' }
+if (Get-Process -Name Nulluxion,Blackout -ErrorAction SilentlyContinue) { throw 'Close Nulluxion/Blackout before running physical diagnostics.' }
 # This test intentionally requests physical monitor sleep, then restores in finally.
 # Close the tray app first to avoid global shortcut conflicts.
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
