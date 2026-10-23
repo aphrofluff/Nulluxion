@@ -1,0 +1,8 @@
+2026-10-22T07:26:44.8012173Z elapsed_ms=0 START seconds=35 read_only=true; last-input timestamps only; no key identities or text
+2026-10-22T07:26:44.8094243Z elapsed_ms=8 LAST_INPUT initial tick_ms=61022296
+2026-10-22T07:26:44.8104234Z elapsed_ms=9 INPUT_CLASSIFICATION enabled; aggregate counts per timer interval; no key identities/text or pointer positions
+2026-10-22T07:26:44.8119285Z elapsed_ms=11 WM_POWERBROADCAST PBT_POWERSETTINGCHANGE session_display=1(on)
+2026-10-22T07:26:51.5840711Z elapsed_ms=6783 LAST_INPUT changed tick_ms=61032312
+2026-10-22T07:27:01.6505607Z elapsed_ms=16849 LAST_INPUT changed tick_ms=61042328
+2026-10-22T07:27:11.6019065Z elapsed_ms=26801 LAST_INPUT changed tick_ms=61052343
+2026-10-22T07:27:19.8016068Z elapsed_ms=35001 STOP
