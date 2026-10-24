@@ -47,8 +47,12 @@ try {
         $pressed.Invoke(2)
     }
     $changed = $type.GetMethod('ChangeShortcut', $flags).Invoke($app, @([uint32]7, [uint32][Windows.Forms.Keys]::B))
-    if ($changed) { throw 'All-screen shortcut was allowed as the original shortcut.' }
-    Write-Output "PASS: isolated overlay bounds/style, both blackout handlers on $screens monitor(s), repeat-toggle/Escape/original-shortcut restoration, reserved shortcut. No visible overlays or hardware writes."
+    if ($changed) { throw 'Duplicate all-screen shortcut was allowed as the focus shortcut.' }
+    $changed = $type.GetMethod('ChangeAllShortcut', $flags).Invoke($app, @([uint32]2, [uint32][Windows.Forms.Keys]::F8))
+    if (-not $changed) { throw 'Isolated all-screen shortcut change failed.' }
+    $changed = $type.GetMethod('ChangeShortcut', $flags).Invoke($app, @([uint32]7, [uint32][Windows.Forms.Keys]::B))
+    if (-not $changed) { throw 'Released all-screen combination remained reserved.' }
+    Write-Output "PASS: isolated overlay bounds/style, both blackout handlers on $screens monitor(s), repeat-toggle/Escape/original-shortcut restoration, configurable distinct shortcuts. No visible overlays, global registrations, settings writes, or hardware writes."
 } finally {
     $type.GetMethod('ExitThreadCore', $flags).Invoke($app, @()) | Out-Null
     $app.Dispose()

@@ -7,7 +7,7 @@ Nulluxion is a lightweight Windows tray app for focusing on work, watching a vid
 - **Focus on one screen:** keep the active window's monitor visible, or choose the monitor under your mouse pointer.
 - **Black out everything:** darken every monitor, including a single-monitor setup.
 - **Restore quickly:** press your shortcut again or **Escape**.
-- **Make it yours:** customize the focus shortcut, enable sign-in startup, and choose overlays or hardware backlight control.
+- **Make it yours:** customize both blackout shortcuts, enable sign-in startup, and choose overlays or hardware backlight control.
 
 [Get started](#get-started) · [Shortcuts](#shortcuts) · [Settings](#settings) · [Monitor support](#monitor-support) · [Troubleshooting](#troubleshooting) · [Developer guide](#developer-guide)
 
@@ -42,16 +42,16 @@ Launch the executable after the build succeeds. If you already have a built copy
 
 Right-click the tray icon for blackout actions, Settings, recovery controls, **About / license**, or **Exit Nulluxion**. Double-click the icon to open Settings. Opening Settings restores an active blackout; exiting also attempts to restore monitor power.
 
-**Backlight control is enabled by default.** For black overlays without hardware power or display-layout changes, turn off **Turn off LCD backlights when blacking out** in Settings.
+**Backlight control is enabled by default.** For black overlays without hardware power or display-layout changes, turn off **Turn off monitor backlights** in Settings.
 
 ## Shortcuts
 
 | Action | Shortcut | What happens |
 | --- | --- | --- |
-| Focus on one screen | **Ctrl + Alt + B** | Keeps the active window's monitor visible and blacks out the others. Customizable in Settings. |
-| Black out all screens | **Ctrl + Alt + Shift + B** | Includes the remaining visible screen. Works with one or more monitors. Fixed and reserved. |
+| Focus on one screen | **Ctrl + Alt + B** by default | Keeps the active window's monitor visible and blacks out the others. Customizable in Settings. |
+| Black out all screens | **Ctrl + Alt + Shift + B** by default | Includes the remaining visible screen. Works with one or more monitors. Customizable in Settings. |
 | Restore screens | **Escape** or your focus shortcut | Removes overlays and requests monitor restoration. |
-| Toggle all-screen blackout off | **Ctrl + Alt + Shift + B** again | Restores all screens when all-screen blackout is active. |
+| Toggle all-screen blackout off | Your all-screen shortcut again | Restores all screens when all-screen blackout is active. |
 
 If you are already focusing on one screen, the all-screen shortcut darkens that screen too. Both blackout modes are also available from the tray menu.
 
@@ -59,18 +59,22 @@ Escape is registered only during blackout. If another app owns it, Nulluxion war
 
 ## Settings
 
-Changes are saved as you make them.
+Changes are saved as you make them. The settings window can be resized; scroll to reach preferences in a smaller window. The closing-to-tray reminder stays visible while you scroll.
 
 | Setting | How to use it |
 | --- | --- |
-| **Toggle shortcut** | Click the shortcut field, then press your new combination. Use Ctrl, Alt, or Shift with a key, or an available function key. Escape, F12, and the all-screen shortcut are reserved. |
+| **Focus on one screen** | Click the shortcut field, then press your new combination. Keeps one monitor visible and darkens the others. |
+| **Black out all screens** | Click the shortcut field, then press your new combination. Darkens every monitor. |
 | **Start Nulluxion when I sign in** | Launches the current executable at sign-in. Keep it in a permanent location before enabling this. |
 | **Keep the monitor with my mouse pointer** | Chooses the monitor under your pointer when you start selective blackout. When unchecked, the active window's monitor stays visible. |
-| **Turn off LCD backlights when blacking out** | Enabled by default. Uses compatible hardware controls; turn it off for black overlays only. |
-| **Retry restoration** | Requests another attempt to restore monitor power and the saved display configuration. |
-| **Retire saved recovery...** | Archives unresolved recovery records after confirmation. Use only after restoring your monitors and layout manually; see [recovery](#a-monitor-stays-off-or-recovery-is-blocked). |
+| **Turn off monitor backlights** | Enabled by default. Darkens supported screens fully; other screens use a black overlay. Turn it off for overlays only. |
+| **Troubleshooting** | Shows detailed monitor status and recovery controls when you need them. |
+| **Retry restoration** | Under Troubleshooting. Requests another attempt to restore monitor power and the saved display configuration. |
+| **Retire saved recovery...** | Under Troubleshooting. Archives unresolved recovery records after confirmation. Use only after restoring your monitors and layout manually; see [recovery](#a-monitor-stays-off-or-recovery-is-blocked). |
 
-The hardware status area reports the latest power or recovery result. It is the first place to look when a monitor behaves differently than expected.
+For either shortcut, use Ctrl, Alt, or Shift with a key, or an available function key. Escape and F12 are reserved, and the two shortcuts must be different. Tab and Shift + Tab move between settings. If another app owns a combination, choose a different one; a failed change keeps your previous shortcut.
+
+Open **Troubleshooting** for the latest monitor power or recovery result. Long messages expand instead of being cut off; scroll down to read them and reach recovery actions.
 
 ## Monitor support
 
@@ -98,7 +102,7 @@ Look for the black tray icon near the clock, including the hidden-icons menu. Nu
 
 ### A shortcut does not work
 
-Another app may already have registered it. Choose a different **Toggle shortcut** in Settings. The all-screen shortcut cannot be changed; free **Ctrl + Alt + Shift + B**, then restart Nulluxion to register it again. The tray actions remain available if a shortcut conflicts.
+Another app may already have registered it. Choose a different combination in the **Focus on one screen** or **Black out all screens** field in Settings. The two shortcuts must be different. The tray actions remain available if a shortcut conflicts.
 
 ### The wrong monitor stays visible
 
@@ -106,7 +110,7 @@ By default, Nulluxion selects the active window's monitor when blackout begins. 
 
 ### The screen is black, but its backlight is still on
 
-Check that backlight control is enabled and DDC/CI is enabled in the monitor's menu. Read the hardware status in Settings. Unsupported monitors use overlays in selective mode; the BenQ EX240N needs time for its no-signal timeout. You can also collect a [read-only capability report](#read-only-and-isolated-diagnostics).
+Check that backlight control is enabled and DDC/CI is enabled in the monitor's menu. Open **Troubleshooting** in Settings to read the detailed status. Unsupported monitors use overlays in selective mode; the BenQ EX240N needs time for its no-signal timeout. You can also collect a [read-only capability report](#read-only-and-isolated-diagnostics).
 
 ### All screens wake immediately, or never go to sleep
 
@@ -114,7 +118,7 @@ The Windows display-sleep fallback reacts to input. Release every shortcut key a
 
 ### A monitor stays off, or recovery is blocked
 
-1. Press your focus shortcut or **Escape**, or use the tray's **Restore / retry monitor power** action. Settings also has **Retry restoration**.
+1. Press your focus shortcut or **Escape**, or use the tray's **Restore / retry monitor power** action. Settings also has **Retry restoration** under **Troubleshooting**.
 2. If software wake fails, use the monitor's physical power button and restore the intended layout in Windows display settings.
 3. If Nulluxion was interrupted, launch it again. It reads saved recovery records and retries restoration.
 4. If recovery remains blocked **after your monitors and layout are restored manually**, choose **Retire saved recovery...** in the tray or Settings. Confirming retries restoration, then archives any remaining records so they no longer block new power changes.
@@ -194,7 +198,8 @@ The [Windows checks workflow](.github/workflows/windows.yml) runs the same check
 
 | File or directory | Responsibility |
 | --- | --- |
-| [Nulluxion.cs](Nulluxion.cs) | Entry point, single-instance guard, tray UI, settings, global shortcuts, overlays, and Windows display-sleep input timing. |
+| [Nulluxion.cs](Nulluxion.cs) | Entry point, single-instance guard, tray actions, saved settings, global shortcuts, overlays, and Windows display-sleep input timing. |
+| [SettingsForm.cs](SettingsForm.cs) | Resizable settings UI, rounded monochrome surfaces, and tray-menu presentation. |
 | [HardwarePower.cs](HardwarePower.cs) | Background monitor-power worker, DDC/CI enumeration and capability parsing, cancellation, wake retries, and power recovery. Defines `IPowerController`, `IDisplayPower`, and injectable monitor operations. |
 | [DisplaySleep.cs](DisplaySleep.cs) | Display-configuration capture, BenQ signal suspension, layout comparison, recovery records, and injectable display operations. |
 | [AssemblyInfo.cs](AssemblyInfo.cs) | Application and assembly metadata. |
@@ -220,7 +225,7 @@ The legacy data directory is **`%LOCALAPPDATA%\Blackout`**, retained for compati
 
 | File | Contents |
 | --- | --- |
-| `settings.xml` | Focus shortcut, monitor-selection preference, and backlight preference. |
+| `settings.xml` | Both blackout shortcuts, monitor-selection preference, and backlight preference. Existing settings without an all-screen shortcut use its default. |
 | `power-recovery.txt` | DDC monitor identities requiring restoration. New records use stable PnP identities. |
 | `display-recovery.bin` | Saved display configuration for signal suspension. Version 2 stores both the original and expected suspended configurations. |
 
@@ -245,6 +250,7 @@ Use a fresh Windows PowerShell process for each diagnostic. Build first for scri
 | [hardware-test.ps1](hardware-test.ps1) | Capability-parser cases against a built executable; accepts `-AssemblyPath`. |
 | [display-recovery-test.ps1](display-recovery-test.ps1) | Compiles current sources and runs synthetic recovery tests with fake display operations and temporary records. |
 | [smoke-test.ps1](smoke-test.ps1) | Isolated overlay properties and tray/shortcut state transitions; accepts `-AssemblyPath`. |
+| [ui-preview.ps1](ui-preview.ps1) | Renders settings and tray-menu PNGs with a no-op controller, without showing windows or changing settings. Includes compact, long-message, and simulated scaling scenarios; accepts `-AssemblyPath` and `-OutputDirectory`. |
 | [display-wake-trace.ps1](display-wake-trace.ps1) | Observes display on/off notifications and last-input timestamp changes. Can run alongside Nulluxion. |
 
 Collect capabilities without changing monitor power:
@@ -252,6 +258,14 @@ Collect capabilities without changing monitor power:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\hardware-probe.ps1
 ```
+
+Render the native UI for visual review after building:
+
+```powershell
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\ui-preview.ps1 -AssemblyPath .\dist\Nulluxion.exe -OutputDirectory .\dist\ui-preview
+```
+
+These previews use fixture status text. The scaling scenario enlarges fonts and geometry; it does not replace testing real Windows DPI changes.
 
 Capture a wake trace, optionally classifying input events:
 

@@ -4,7 +4,8 @@
 #requires -Version 5.1
 param(
     [ValidateNotNullOrEmpty()][string]$AssemblyPath = (Join-Path $PSScriptRoot 'dist\Nulluxion.exe'),
-    [ValidateNotNullOrEmpty()][string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\ui-preview')
+    [ValidateNotNullOrEmpty()][string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\ui-preview'),
+    [switch]$IncludeRepresentativeDefault
 )
 $ErrorActionPreference = 'Stop'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'UI previews require Windows and .NET Framework 4.8.' }
@@ -28,10 +29,33 @@ function Get-ControlTree([Windows.Forms.Control]$Control) {
     foreach ($child in $Control.Controls) { Get-ControlTree $child }
 }
 
-function Save-ControlImage([Windows.Forms.Control]$Control, [string]$Name) {
+function Settle-ControlLayout([Windows.Forms.Control]$Control) {
     $null = $Control.Handle
-    $Control.PerformLayout()
-    foreach ($child in @(Get-ControlTree $Control)) { $null = $child.Handle; $child.PerformLayout() }
+    $controls = @(Get-ControlTree $Control)
+    foreach ($child in $controls) { $null = $child.Handle }
+    # AutoSize tables can require a second pass after wrapping changes a row.
+    for ($pass = 0; $pass -lt 4; $pass++) {
+        for ($index = $controls.Count - 1; $index -ge 0; $index--) { $controls[$index].PerformLayout() }
+        foreach ($child in $controls) { $child.PerformLayout() }
+    }
+}
+
+function Save-ControlImage([Windows.Forms.Control]$Control, [string]$Name, [bool]$ScrollBottom = $false) {
+    Settle-ControlLayout $Control
+    if ($ScrollBottom) {
+        $scrollBody = @(Get-ControlTree $Control | Where-Object { $_.Name -eq 'settingsBody' -and $_ -is [Windows.Forms.ScrollableControl] })
+        if ($scrollBody.Count -gt 0) {
+            $scrollBody[0].AutoScrollPosition = New-Object Drawing.Point 0, 100000
+            if ($scrollBody[0].AutoScrollPosition.Y -eq 0 -and $scrollBody[0].DisplayRectangle.Height -gt $scrollBody[0].ClientSize.Height) {
+                # Hidden controls do not expose an active scrollbar. Move the
+                # native scrollable display rectangle directly for this image.
+                $scrollMethod = [Windows.Forms.ScrollableControl].GetMethod('SetDisplayRectLocation', [Reflection.BindingFlags]'Instance,NonPublic')
+                $scrollOffset = $scrollBody[0].ClientSize.Height - $scrollBody[0].DisplayRectangle.Height
+                $scrollMethod.Invoke($scrollBody[0], @([int]0, [int]$scrollOffset)) | Out-Null
+            }
+            $report.Add("$Name scroll position: $($scrollBody[0].AutoScrollPosition)")
+        } else { $report.Add("$Name : settingsBody not present; no scrolling applied.") }
+    }
     $bitmap = New-Object Drawing.Bitmap $Control.Width, $Control.Height
     try {
         $Control.DrawToBitmap($bitmap, (New-Object Drawing.Rectangle 0, 0, $bitmap.Width, $bitmap.Height))
@@ -54,20 +78,33 @@ $app = $trayType.GetMethod('CreateForSmokeTest', [Reflection.BindingFlags]'Stati
 $icon = [Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path -LiteralPath $AssemblyPath).Path)
 if ($null -eq $icon) { $icon = [Drawing.SystemIcons]::Application.Clone() }
 try {
-    foreach ($scenario in @('default', 'compact', 'long-status', 'simulated-150pct')) {
+    $scenarios = @('default', 'compact', 'compact-bottom', 'troubleshooting', 'compact-troubleshooting-bottom', 'long-status', 'long-status-bottom', 'simulated-150pct')
+    if ($IncludeRepresentativeDefault) { $scenarios += 'representative-default' }
+    foreach ($scenario in $scenarios) {
+        # Only the isolated in-memory fixture is modified, before controls and
+        # their event subscriptions exist. No settings persistence is invoked.
+        $fakeSettings = $trayType.GetField('Settings', $flags).GetValue($app)
+        $fakeSettings.TurnOffBacklights = ($scenario -eq 'representative-default')
+        $fixtureStatus = if ($scenario -eq 'representative-default') { 'Hardware power enabled for compatible DDC/CI monitors.' } else { 'Overlay test: hardware operations disabled.' }
+        $trayType.GetField('HardwareStatus', $flags).SetValue($app, $fixtureStatus)
         $form = [Activator]::CreateInstance($formType, $flags, $null, @($app, $icon), $null)
         try {
             # Never call Show, ShowDialog, or any control action/event handler.
             $form.StartPosition = [Windows.Forms.FormStartPosition]::Manual
             $form.Location = New-Object Drawing.Point -32000, -32000
             $form.ShowInTaskbar = $false
-            if ($scenario -eq 'compact') {
-                $form.MinimumSize = [Drawing.Size]::Empty
-                $form.ClientSize = New-Object Drawing.Size ([Math]::Min($form.ClientSize.Width, 760)), ([Math]::Min($form.ClientSize.Height, 560))
+            if ($scenario -like '*compact*') {
+                $minimumClientWidth = [Math]::Max(484, $form.MinimumSize.Width - ($form.Width - $form.ClientSize.Width))
+                $form.ClientSize = New-Object Drawing.Size $minimumClientWidth, 480
             }
-            if ($scenario -eq 'long-status') {
+            if ($scenario -like 'long-status*') {
                 $trayType.GetField('HardwareStatus', $flags).SetValue($app, 'Restoration requires attention. A monitor could not be matched safely after the display layout changed. Restore your monitors and arrangement manually, then retry restoration. Saved recovery records remain available. Monitor: DISPLAY-EXAMPLE-1234567890; connection: DisplayPort; the previous operation was interrupted before confirmation.')
                 $formType.GetMethod('UpdateHardwareStatus', $flags).Invoke($form, @()) | Out-Null
+            }
+            if ($scenario -like '*troubleshooting*' -or $scenario -like 'long-status*') {
+                # Expand presentation only; no recovery or monitor action runs.
+                $expandDetails = $formType.GetMethod('SetTroubleshootingExpanded', $flags)
+                if ($null -ne $expandDetails) { $expandDetails.Invoke($form, @($true)) | Out-Null }
             }
             if ($scenario -eq 'simulated-150pct') {
                 # A geometry/font stress preview, not a real per-monitor DPI test.
@@ -80,7 +117,7 @@ try {
                     $controls[$i].Font = $scaledFont
                 }
             }
-            Save-ControlImage $form $scenario
+            Save-ControlImage $form $scenario ($scenario -like '*-bottom')
         } finally { $form.Dispose() }
         $trayType.GetField('HardwareStatus', $flags).SetValue($app, 'Overlay test: hardware operations disabled.')
     }
@@ -91,6 +128,7 @@ try {
     foreach ($item in $menu.Items) { $report.Add("  Menu: $($item.Text); enabled=$($item.Enabled)") }
     $report.Add('No visible windows, control input, user settings writes, global shortcuts, overlays, or physical monitor operations were used.')
     $report.Add('simulated-150pct scales geometry and fonts; it does not replace testing real Windows DPI changes. OUTSIDE PARENT can include content reachable through scrolling.')
+    if ($IncludeRepresentativeDefault) { $report.Add('representative-default is an explicitly synthetic fixture: isolated settings enable backlights and status copy represents a normal hardware-enabled startup. No hardware capability was probed.') }
     $report | Set-Content -LiteralPath (Join-Path $output 'geometry.txt') -Encoding UTF8
     Write-Output "Rendered isolated settings scenarios and tray menu to $output"
 } finally {

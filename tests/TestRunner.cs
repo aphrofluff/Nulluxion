@@ -15,6 +15,7 @@ namespace Nulluxion.Tests
                 Console.WriteLine("PASS: " + HardwarePowerTests.Run() + " isolated hardware worker assertions.");
                 DisplaySleepTests.Run();
                 TrayAppTests.Run();
+                SettingsFormTests.Run();
                 Console.WriteLine("All isolated tests passed (no physical monitor commands).");
                 return 0;
             }

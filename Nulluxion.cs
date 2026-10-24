@@ -19,6 +19,8 @@ namespace Nulluxion
     {
         public uint Modifiers = 3;
         public uint Key = (uint)Keys.B;
+        public uint AllModifiers = 7;
+        public uint AllKey = (uint)Keys.B;
         public bool UsePointer;
         public bool TurnOffBacklights = true;
         // Keep the legacy data location so existing settings and recovery records remain usable.
@@ -33,8 +35,7 @@ namespace Nulluxion
                 using (var reader = XmlReader.Create(path, options))
                 {
                     Settings settings = (Settings)new XmlSerializer(typeof(Settings)).Deserialize(reader) ?? new Settings();
-                    if (!IsValidShortcut(settings.Modifiers, settings.Key))
-                    { settings.Modifiers = 3; settings.Key = (uint)Keys.B; }
+                    settings.RepairShortcuts();
                     return settings;
                 }
             }
@@ -44,7 +45,9 @@ namespace Nulluxion
         { Save(FileName); }
         internal void Save(string path)
         {
-            if (!IsValidShortcut(Modifiers, Key)) throw new InvalidOperationException("The shortcut is invalid or reserved.");
+            if (!IsValidShortcut(Modifiers, Key) || !IsValidShortcut(AllModifiers, AllKey) ||
+                (Modifiers == AllModifiers && Key == AllKey))
+                throw new InvalidOperationException("Choose two different, valid shortcuts. Escape and F12 are reserved.");
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
             string temporary = path + ".tmp";
             using (var file = File.Create(temporary)) new XmlSerializer(typeof(Settings)).Serialize(file, this);
@@ -55,8 +58,21 @@ namespace Nulluxion
             if ((modifiers & ~15u) != 0 || key < 8 || key > 254 || key == (uint)Keys.Escape || key == (uint)Keys.F12) return false;
             if (key == (uint)Keys.ControlKey || key == (uint)Keys.Menu || key == (uint)Keys.ShiftKey ||
                 key == (uint)Keys.LWin || key == (uint)Keys.RWin || (key >= (uint)Keys.LShiftKey && key <= (uint)Keys.RMenu)) return false;
-            if (modifiers == 7 && key == (uint)Keys.B) return false;
             return modifiers != 0 || (key >= (uint)Keys.F1 && key <= (uint)Keys.F24);
+        }
+        internal void RepairShortcuts()
+        {
+            bool focusValid = IsValidShortcut(Modifiers, Key), allValid = IsValidShortcut(AllModifiers, AllKey);
+            if (!focusValid)
+            {
+                Modifiers = allValid && AllModifiers == 3 && AllKey == (uint)Keys.B ? 7u : 3u;
+                Key = (uint)Keys.B;
+            }
+            if (!allValid || (Modifiers == AllModifiers && Key == AllKey))
+            {
+                AllModifiers = Modifiers == 7 && Key == (uint)Keys.B ? 3u : 7u;
+                AllKey = (uint)Keys.B;
+            }
         }
     }
 
@@ -142,6 +158,7 @@ namespace Nulluxion
     internal sealed class TrayApp : ApplicationContext
     {
         internal readonly Settings Settings;
+        internal Func<int, bool> ShortcutCapture;
         private readonly HotkeyWindow hotkeys = new HotkeyWindow();
         private readonly List<Overlay> overlays = new List<Overlay>();
         private readonly NotifyIcon tray;
@@ -154,30 +171,48 @@ namespace Nulluxion
         private readonly bool interactive;
         private readonly Action<bool> displayPower;
         private readonly Func<bool> inputIsQuiet;
+        private readonly Func<int, uint, uint, bool> registerShortcut;
+        private readonly Action<int> unregisterShortcut;
+        private readonly Action<Settings> saveSettings;
+        private bool focusShortcutRegistered, allShortcutRegistered;
         private readonly ToolStripMenuItem retireRecovery;
         internal string HardwareStatus = "Hardware power enabled for compatible DDC/CI monitors.";
         private readonly System.Windows.Forms.Timer sleepTimer = new System.Windows.Forms.Timer { Interval = 800 };
         private bool displaySleepRequested;
         private bool windowsSleepFallback;
         internal bool IsActive { get { return overlays.Count > 0; } }
+        internal bool RecoveryNeedsAttention { get { return hardware.HasUnresolvedRecovery; } }
         internal static string ExePath { get { return Assembly.GetExecutingAssembly().Location; } }
         internal TrayApp(bool startup) : this(startup, new HardwarePower(), Settings.Load(), true, null) { }
         internal TrayApp(bool startup, IPowerController power, Settings settings, bool interactive, Action<bool> displayPower)
             : this(startup, power, settings, interactive, displayPower, null) { }
         internal TrayApp(bool startup, IPowerController power, Settings settings, bool interactive, Action<bool> displayPower, Func<bool> inputIsQuiet)
+            : this(startup, power, settings, interactive, displayPower, inputIsQuiet, null, null, null) { }
+        internal TrayApp(bool startup, IPowerController power, Settings settings, bool interactive, Action<bool> displayPower, Func<bool> inputIsQuiet,
+            Func<int, uint, uint, bool> registerShortcut, Action<int> unregisterShortcut, Action<Settings> saveSettings)
         {
             if (power == null) throw new ArgumentNullException("power");
             hardware = power;
             Settings = settings ?? new Settings();
+            Settings.RepairShortcuts();
             this.interactive = interactive;
+            this.registerShortcut = registerShortcut ?? (interactive
+                ? new Func<int, uint, uint, bool>(delegate(int id, uint modifiers, uint key) { return Native.RegisterHotKey(hotkeys.Handle, id, modifiers, key); })
+                : delegate { return true; });
+            this.unregisterShortcut = unregisterShortcut ?? (interactive
+                ? new Action<int>(delegate(int id) { Native.UnregisterHotKey(hotkeys.Handle, id); }) : delegate { });
+            // Noninteractive fixtures never write user settings, even for valid shortcuts.
+            this.saveSettings = saveSettings ?? (interactive ? new Action<Settings>(delegate(Settings value) { value.Save(); }) : delegate { });
             this.inputIsQuiet = inputIsQuiet ?? (interactive ? new Func<bool>(new DisplaySleepInput().IsQuiet) : delegate { return true; });
             this.displayPower = displayPower ?? delegate(bool sleep) { Native.DefWindowProc(hotkeys.Handle, 0x0112, new IntPtr(0xF170), new IntPtr(sleep ? 2 : -1)); };
             icon = Icon.ExtractAssociatedIcon(ExePath) ?? (Icon)SystemIcons.Application.Clone();
             var menu = new ContextMenuStrip();
+            UtilityTheme.StyleMenu(menu);
             toggle = new ToolStripMenuItem("Black out other monitors", null, delegate { Toggle(); });
             menu.Items.Add(toggle);
-            toggleAll = new ToolStripMenuItem("Black out all monitors (Ctrl+Alt+Shift+B)", null, delegate { ToggleAll(); });
+            toggleAll = new ToolStripMenuItem("Black out all monitors", null, delegate { ToggleAll(); });
             menu.Items.Add(toggleAll);
+            UpdateTrayActions();
             menu.Items.Add("Settings", null, delegate { OpenSettings(); });
             menu.Items.Add("About / license", null, delegate
             {
@@ -237,26 +272,38 @@ namespace Nulluxion
             retireRecovery = new ToolStripMenuItem("Retire saved recovery...", null, delegate { ConfirmRetireRecovery(); });
             retireRecovery.Enabled = hardware.HasUnresolvedRecovery;
             menu.Items.Insert(3, retireRecovery);
+            menu.Items.Insert(4, new ToolStripSeparator());
             HardwareStatus = hardware.LastStatus;
             tray.DoubleClick += delegate { OpenSettings(); };
-            hotkeys.Pressed = delegate(int id) { if (id == 2) Restore(); else if (id == 3) ToggleAll(); else if (id == 1) Toggle(); };
-            bool allRegistered = !interactive || Native.RegisterHotKey(hotkeys.Handle, 3, 7 | 0x4000, (uint)Keys.B);
-            bool registered = !interactive || Native.RegisterHotKey(hotkeys.Handle, 1, Settings.Modifiers | 0x4000, Settings.Key);
+            hotkeys.Pressed = DispatchHotkey;
+            allShortcutRegistered = this.registerShortcut(3, Settings.AllModifiers | 0x4000, Settings.AllKey);
+            focusShortcutRegistered = this.registerShortcut(1, Settings.Modifiers | 0x4000, Settings.Key);
             if (interactive)
             {
             SystemEvents.DisplaySettingsChanged += DisplayChanged;
             SystemEvents.SessionSwitch += SessionChanged;
             SystemEvents.PowerModeChanged += PowerChanged;
             SystemEvents.SessionEnding += SessionEnding;
-            if (!startup || !registered) OpenSettings();
-            if (!registered) MessageBox.Show("Your shortcut is already in use. Choose another shortcut in Nulluxion settings.", "Nulluxion", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            if (!allRegistered) tray.ShowBalloonTip(4000, "Nulluxion", "Ctrl+Alt+Shift+B is already in use. All-screen blackout is still available from the tray menu. Restart Nulluxion after freeing the shortcut.", ToolTipIcon.Info);
+            if (!startup || !focusShortcutRegistered || !allShortcutRegistered) OpenSettings();
+            if (!focusShortcutRegistered || !allShortcutRegistered)
+                MessageBox.Show((!focusShortcutRegistered ? "Focus on one screen: " + ShortcutText(false) + " is already in use.\n" : "") +
+                    (!allShortcutRegistered ? "Black out all screens: " + ShortcutText(true) + " is already in use.\n" : "") +
+                    "Choose another shortcut in settings. Both actions remain available from the tray menu.", "Nulluxion", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
         // Used by the isolated smoke test; never creates a real recovery worker.
         internal static TrayApp CreateForSmokeTest()
         {
             return new TrayApp(true, new OverlayOnlyPower(), new Settings { TurnOffBacklights = false }, false, delegate { });
+        }
+        internal void DispatchHotkey(int id)
+        {
+            if (id == 2) { Restore(); return; }
+            if (id != 1 && id != 3) return;
+            // A registered combination may arrive as WM_HOTKEY instead of a
+            // textbox key event. Editing either field must never black out screens.
+            if (ShortcutCapture != null && ShortcutCapture(id)) return;
+            if (id == 3) ToggleAll(); else Toggle();
         }
         internal void RequestDisplaySleep()
         {
@@ -315,8 +362,7 @@ namespace Nulluxion
                     }
                 allScreens = includeAll;
                 windowsSleepFallback = false;
-                toggle.Text = "Restore all monitors";
-                toggleAll.Text = includeAll ? "Restore all monitors (Ctrl+Alt+Shift+B)" : "Black out all monitors (Ctrl+Alt+Shift+B)";
+                UpdateTrayActions();
                 tray.Text = "Nulluxion — active";
                 if (Settings.TurnOffBacklights)
                 {
@@ -349,8 +395,7 @@ namespace Nulluxion
                     overlays.Clear();
                     allScreens = false;
                     Native.UnregisterHotKey(hotkeys.Handle, 2);
-                    toggle.Text = "Black out other monitors";
-                    toggleAll.Text = "Black out all monitors (Ctrl+Alt+Shift+B)";
+                    UpdateTrayActions();
                     tray.Text = "Nulluxion";
                 }
             }
@@ -370,26 +415,66 @@ namespace Nulluxion
         private readonly SynchronizationContext uiContext = new WindowsFormsSynchronizationContext();
         private bool disposed;
         internal bool ChangeShortcut(uint modifiers, uint key)
+        { return ChangeShortcutCore(false, modifiers, key); }
+        internal bool ChangeAllShortcut(uint modifiers, uint key)
+        { return ChangeShortcutCore(true, modifiers, key); }
+        private bool ChangeShortcutCore(bool all, uint modifiers, uint key)
         {
-            // Keep the all-screen shortcut separate, even if its registration failed.
             if (!Nulluxion.Settings.IsValidShortcut(modifiers, key)) return false;
-            Native.UnregisterHotKey(hotkeys.Handle, 1);
-            if (!Native.RegisterHotKey(hotkeys.Handle, 1, modifiers | 0x4000, key))
+            uint otherModifiers = all ? Settings.Modifiers : Settings.AllModifiers;
+            uint otherKey = all ? Settings.Key : Settings.AllKey;
+            if (modifiers == otherModifiers && key == otherKey) return false;
+            uint oldModifiers = all ? Settings.AllModifiers : Settings.Modifiers;
+            uint oldKey = all ? Settings.AllKey : Settings.Key;
+            bool wasRegistered = all ? allShortcutRegistered : focusShortcutRegistered;
+            if (wasRegistered && modifiers == oldModifiers && key == oldKey) return true;
+            int id = all ? 3 : 1;
+            unregisterShortcut(id);
+            SetShortcutRegistered(all, false);
+            if (!registerShortcut(id, modifiers | 0x4000, key))
             {
-                Native.RegisterHotKey(hotkeys.Handle, 1, Settings.Modifiers | 0x4000, Settings.Key);
+                RestoreShortcutRegistration(all, id, oldModifiers, oldKey, wasRegistered);
                 return false;
             }
-            uint oldModifiers = Settings.Modifiers, oldKey = Settings.Key;
-            Settings.Modifiers = modifiers; Settings.Key = key;
-            try { Settings.Save(); }
+            SetShortcutRegistered(all, true);
+            SetShortcutSettings(all, modifiers, key);
+            try { saveSettings(Settings); }
             catch
             {
-                Settings.Modifiers = oldModifiers; Settings.Key = oldKey;
-                Native.UnregisterHotKey(hotkeys.Handle, 1);
-                Native.RegisterHotKey(hotkeys.Handle, 1, oldModifiers | 0x4000, oldKey);
+                SetShortcutSettings(all, oldModifiers, oldKey);
+                unregisterShortcut(id);
+                SetShortcutRegistered(all, false);
+                RestoreShortcutRegistration(all, id, oldModifiers, oldKey, wasRegistered);
                 throw;
             }
+            UpdateTrayActions();
             return true;
+        }
+        private void SetShortcutSettings(bool all, uint modifiers, uint key)
+        {
+            if (all) { Settings.AllModifiers = modifiers; Settings.AllKey = key; }
+            else { Settings.Modifiers = modifiers; Settings.Key = key; }
+        }
+        private void SetShortcutRegistered(bool all, bool registered)
+        { if (all) allShortcutRegistered = registered; else focusShortcutRegistered = registered; }
+        private void RestoreShortcutRegistration(bool all, int id, uint modifiers, uint key, bool wasRegistered)
+        {
+            if (!wasRegistered) return;
+            bool restored = registerShortcut(id, modifiers | 0x4000, key);
+            SetShortcutRegistered(all, restored);
+            if (!restored) throw new InvalidOperationException("The previous shortcut could not be restored. Choose another shortcut; the tray menu is still available.");
+        }
+        internal string ShortcutText(bool all)
+        {
+            uint m = all ? Settings.AllModifiers : Settings.Modifiers;
+            uint key = all ? Settings.AllKey : Settings.Key;
+            return ((m & 2) != 0 ? "Ctrl + " : "") + ((m & 1) != 0 ? "Alt + " : "") +
+                ((m & 4) != 0 ? "Shift + " : "") + ((m & 8) != 0 ? "Win + " : "") + ((Keys)key).ToString();
+        }
+        private void UpdateTrayActions()
+        {
+            toggle.Text = (IsActive ? "Restore all monitors" : "Black out other monitors") + " (" + ShortcutText(false) + ")";
+            toggleAll.Text = (IsActive && allScreens ? "Restore all monitors" : "Black out all monitors") + " (" + ShortcutText(true) + ")";
         }
         internal static bool StartsOnBoot()
         {
@@ -433,114 +518,12 @@ namespace Nulluxion
                 try { hardware.Dispose(); }
                 finally
                 {
-                    sleepTimer.Dispose(); hotkeys.Dispose(); tray.Visible = false;
+                    sleepTimer.Dispose(); unregisterShortcut(1); unregisterShortcut(3); hotkeys.Dispose(); tray.Visible = false;
                     tray.ContextMenuStrip.Dispose(); tray.Dispose();
                     if (window != null) window.Dispose();
                     icon.Dispose();
                 }
             }
-        }
-    }
-
-    internal sealed class SettingsForm : Form
-    {
-        private readonly TrayApp app;
-        private readonly TextBox shortcut;
-        private readonly Label status;
-        private readonly Label hardwareStatus;
-        internal SettingsForm(TrayApp app, Icon icon)
-        {
-            this.app = app;
-            Text = "Nulluxion"; Icon = icon; ClientSize = new Size(460, 740);
-            Font = new Font("Segoe UI", 10); BackColor = Color.FromArgb(22, 22, 24); ForeColor = Color.WhiteSmoke;
-            FormBorderStyle = FormBorderStyle.FixedSingle; MaximizeBox = false;
-            StartPosition = FormStartPosition.CenterScreen; AutoScaleMode = AutoScaleMode.Dpi;
-            Controls.Add(new Label { Text = "Nulluxion", Font = new Font("Segoe UI", 26, FontStyle.Bold), Location = new Point(28, 22), AutoSize = true });
-            Controls.Add(new Label { Text = "One screen. Your full attention.", Location = new Point(30, 78), AutoSize = true, ForeColor = Color.Silver });
-            Controls.Add(new Label { Text = "Toggle shortcut", Location = new Point(30, 124), AutoSize = true });
-            shortcut = new TextBox { Location = new Point(30, 151), Size = new Size(398, 30), ReadOnly = true, BackColor = Color.FromArgb(40, 40, 44), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
-            shortcut.Text = ShortcutText(); shortcut.KeyDown += CaptureShortcut;
-            Controls.Add(shortcut);
-            Controls.Add(new Label { Text = "Click above, then press your new shortcut.", Location = new Point(30, 187), AutoSize = true, ForeColor = Color.Silver });
-            var startup = new CheckBox { Text = "Start Nulluxion when I sign in", Location = new Point(30, 231), AutoSize = true, Checked = TrayApp.StartsOnBoot() };
-            bool updatingStartup = false;
-            startup.CheckedChanged += delegate
-            {
-                if (updatingStartup) return;
-                bool old = !startup.Checked;
-                try { TrayApp.SetStartup(startup.Checked); status.Text = "Startup setting saved."; }
-                catch (Exception ex) { updatingStartup = true; startup.Checked = old; updatingStartup = false; status.Text = "Could not change startup: " + ex.Message; }
-            };
-            Controls.Add(startup);
-            var pointer = new CheckBox { Text = "Keep the monitor with my mouse pointer", Location = new Point(30, 266), AutoSize = true, Checked = app.Settings.UsePointer };
-            bool updatingPointer = false;
-            pointer.CheckedChanged += delegate
-            {
-                if (updatingPointer) return;
-                bool old = app.Settings.UsePointer;
-                try { app.Settings.UsePointer = pointer.Checked; app.Settings.Save(); status.Text = "Monitor preference saved."; }
-                catch (Exception ex) { app.Settings.UsePointer = old; updatingPointer = true; pointer.Checked = old; updatingPointer = false; status.Text = "Could not save: " + ex.Message; }
-            };
-            Controls.Add(pointer);
-            Controls.Add(new Label { Text = "By default, keep the active window’s monitor.\nPress the shortcut again or Escape to restore.", Location = new Point(30, 307), Size = new Size(400, 46), ForeColor = Color.Silver });
-            Controls.Add(new Label { Text = "All screens: Ctrl + Alt + Shift + B (fixed)\nPress again to restore all screens.", Location = new Point(30, 363), Size = new Size(400, 46), ForeColor = Color.Silver });
-            var backlights = new CheckBox { Text = "Turn off LCD backlights when blacking out", Location = new Point(30, 420), AutoSize = true, Checked = app.Settings.TurnOffBacklights };
-            bool updatingBacklights = false;
-            backlights.CheckedChanged += delegate
-            {
-                if (updatingBacklights) return;
-                bool old = app.Settings.TurnOffBacklights;
-                try
-                {
-                    app.Settings.TurnOffBacklights = backlights.Checked;
-                    app.Settings.Save();
-                    if (!backlights.Checked) app.Restore();
-                    UpdateHardwareStatus();
-                    status.Text = "Backlight preference saved.";
-                }
-                catch (Exception ex)
-                {
-                    app.Settings.TurnOffBacklights = old;
-                    updatingBacklights = true; backlights.Checked = old; updatingBacklights = false;
-                    status.Text = "Could not save: " + ex.Message;
-                }
-            };
-            Controls.Add(backlights);
-            Controls.Add(new Label { Text = "BenQ: signal sleep. Other displays: DDC/CI.\nAll screens: hardware off, with Windows sleep fallback.", Location = new Point(30, 451), Size = new Size(400, 46), ForeColor = Color.Silver });
-            hardwareStatus = new Label { Location = new Point(30, 501), Size = new Size(398, 110), ForeColor = Color.Silver, AutoEllipsis = true };
-            Controls.Add(hardwareStatus);
-            UpdateHardwareStatus();
-            var retry = new Button { Text = "Retry restoration", Location = new Point(30, 620), Size = new Size(185, 34) };
-            retry.Click += delegate { app.Restore(); };
-            Controls.Add(retry);
-            var retire = new Button { Text = "Retire saved recovery...", Location = new Point(225, 620), Size = new Size(203, 34) };
-            retire.Click += delegate { app.ConfirmRetireRecovery(); };
-            Controls.Add(retire);
-            status = new Label { Text = "Closing this window keeps Nulluxion in the tray.", Location = new Point(30, 674), Size = new Size(398, 48), ForeColor = Color.FromArgb(170, 180, 195) };
-            Controls.Add(status);
-        }
-        internal void UpdateHardwareStatus()
-        {
-            hardwareStatus.Text = (app.Settings.TurnOffBacklights ? "" : "Backlight power disabled. Using black overlays only.\n") + app.HardwareStatus;
-        }
-        private string ShortcutText()
-        {
-            uint m = app.Settings.Modifiers;
-            return ((m & 2) != 0 ? "Ctrl + " : "") + ((m & 1) != 0 ? "Alt + " : "") + ((m & 4) != 0 ? "Shift + " : "") + ((m & 8) != 0 ? "Win + " : "") + ((Keys)app.Settings.Key).ToString();
-        }
-        private void CaptureShortcut(object sender, KeyEventArgs e)
-        {
-            e.SuppressKeyPress = true;
-            if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.Menu || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.LWin || e.KeyCode == Keys.RWin) return;
-            uint modifiers = (uint)((e.Control ? 2 : 0) | (e.Alt ? 1 : 0) | (e.Shift ? 4 : 0));
-            if (!Settings.IsValidShortcut(modifiers, (uint)e.KeyCode))
-            { status.Text = "Use Ctrl, Alt or Shift with a key, or a function key.\nEscape and F12 are reserved."; return; }
-            try
-            {
-                if (!app.ChangeShortcut(modifiers, (uint)e.KeyCode)) { status.Text = "That shortcut is in use or reserved for all screens."; return; }
-                shortcut.Text = ShortcutText(); status.Text = "Shortcut saved. Ready whenever you are.";
-            }
-            catch (Exception ex) { status.Text = "Could not save shortcut: " + ex.Message; }
         }
     }
 
